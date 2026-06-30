@@ -9,14 +9,18 @@ __pycache__/
 *$py.class
 *.so
 
-# Database & Data
+# Database (rebuilt on startup - too big for GitHub)
 data/db/
-data/raw/
 *.duckdb
-*.parquet
 
-# Artifacts (trained models - optional, but keeps repo small)
+# Raw data (large CSVs - not uploaded)
+data/raw/
+
+# Artifacts (models rebuilt on startup)
 artifacts/
+
+# Exports (regenerated)
+exports/
 
 # Environment variables
 .env
@@ -29,3 +33,7 @@ artifacts/
 # OS
 .DS_Store
 Thumbs.db
+
+# IMPORTANT: keep sample data (needed for cloud deployment)
+!data/sample/
+!data/sample/**

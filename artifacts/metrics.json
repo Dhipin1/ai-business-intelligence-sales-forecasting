@@ -1,0 +1,29 @@
+{
+  "prophet": {
+    "mae": 10962.760063567075,
+    "rmse": 13613.873163769875,
+    "mape": 87.94704625611428
+  },
+  "xgboost": {
+    "mae": 6766.098571614589,
+    "rmse": 8353.009888806166,
+    "mape": 49.279992588201374
+  },
+  "xgb_features": [
+    "dow",
+    "week",
+    "month",
+    "year",
+    "day",
+    "is_weekend",
+    "lag_1",
+    "lag_7",
+    "lag_14",
+    "lag_28",
+    "roll_7",
+    "roll_14"
+  ],
+  "rows_daily": 612,
+  "rows_order_items": 110197,
+  "rows_rfm": 93358
+}
