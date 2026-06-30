@@ -1,10 +1,10 @@
 import sys
+import os
 from pathlib import Path
 
-# Ensure project root is on Python path so: `from src...` works
+# Project root on path
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT))
 
 import json
 import pandas as pd
@@ -13,15 +13,69 @@ import plotly.express as px
 
 from src.config import settings
 from src.db import connect
-from src.forecasting import load_prophet, load_xgb
 from src.features import make_time_features, make_lag_features
 from src.insights import rule_based_insights
 
 st.set_page_config(page_title="AI BI + Sales Forecasting (Olist)", layout="wide")
 
+
+# -------------------------------------------------------------------
+# Build database + models on first run (for cloud deployment)
+# -------------------------------------------------------------------
+@st.cache_resource
+def ensure_db():
+    """If DB doesn't exist, build it from sample data and train models."""
+    if settings.duckdb_path.exists():
+        return True
+
+    from src.etl import run_etl
+    from src.forecasting import train_xgb, save_xgb
+    from src.segmentation import compute_rfm, train_kmeans_rfm, save_segmentation
+
+    sample_dir = ROOT / "data" / "sample"
+    raw_dir = sample_dir if sample_dir.exists() else settings.raw_data_dir
+
+    con_build = connect(settings.duckdb_path)
+    try:
+        run_etl(con_build, raw_dir)
+
+        # Train XGBoost
+        daily = con_build.execute(
+            "SELECT ds, y, orders, items FROM mart.mart_sales_daily ORDER BY ds"
+        ).df()
+        if not daily.empty:
+            settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                xgb_model, _, feats = train_xgb(daily, test_days=30)
+                save_xgb(xgb_model, feats, settings.artifacts_dir / "xgb_model.joblib")
+            except Exception as e:
+                print("XGB training skipped:", e)
+
+        # Train RFM
+        order_items = con_build.execute("""
+            SELECT customer_unique_id, order_id, order_purchase_date, item_gmv
+            FROM mart.mart_order_items
+            WHERE order_status='delivered'
+              AND customer_unique_id IS NOT NULL
+              AND order_purchase_date IS NOT NULL
+        """).df()
+        if not order_items.empty:
+            try:
+                rfm = compute_rfm(order_items)
+                scaler, km, rfm_scored = train_kmeans_rfm(rfm, n_clusters=4)
+                save_segmentation(settings.artifacts_dir, scaler, km, rfm_scored)
+            except Exception as e:
+                print("RFM training skipped:", e)
+    finally:
+        con_build.close()
+
+    return True
+
+
 @st.cache_resource
 def get_con():
     return connect(settings.duckdb_path)
+
 
 @st.cache_data
 def load_kpis():
@@ -56,7 +110,16 @@ def load_state_sales():
         ORDER BY gmv DESC
     """).df()
 
+
+def load_xgb_local():
+    import joblib
+    return joblib.load(settings.artifacts_dir / "xgb_model.joblib")
+
+
 def main():
+    # Build DB if missing (cloud)
+    ensure_db()
+
     st.title("AI Business Intelligence & Sales Forecasting (Olist)")
 
     page = st.sidebar.radio(
@@ -108,82 +171,55 @@ def main():
         st.dataframe(daily, use_container_width=True)
 
     elif page == "Forecast":
-        st.subheader("Forecast next N days")
+        st.subheader("Forecast next N days (XGBoost)")
 
         horizon = st.slider("Forecast horizon (days)", 7, 180, 60)
-        model_choice = st.selectbox("Model", ["Prophet", "XGBoost"], index=0)
+
+        xgb_path = settings.artifacts_dir / "xgb_model.joblib"
+        if not xgb_path.exists():
+            st.error("XGBoost model not found.")
+            return
+
+        pack = load_xgb_local()
+        model = pack["model"]
+        features = pack["features"]
 
         last_date = daily["ds"].max()
         future_dates = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")
-        future_df = pd.DataFrame({"ds": future_dates})
 
-        if model_choice == "Prophet":
-            model_path = settings.artifacts_dir / "prophet_model.json"
-            if not model_path.exists():
-                st.error("Prophet model not found. Run: python scripts/train_models.py")
-                return
+        hist = daily[["ds", "y"]].copy()
+        combined = pd.concat(
+            [hist, pd.DataFrame({"ds": future_dates, "y": [None] * horizon})],
+            ignore_index=True
+        ).sort_values("ds")
+        combined["ds"] = pd.to_datetime(combined["ds"])
 
-            m = load_prophet(model_path)
-            fc = m.predict(future_df)
-            out = fc[["ds", "yhat", "yhat_lower", "yhat_upper"]].copy()
+        preds = []
+        for i in range(horizon):
+            target_date = future_dates[i]
+            temp = combined.copy()
+            temp["y"] = pd.to_numeric(temp["y"], errors="coerce")
+            temp2 = make_time_features(temp[["ds", "y"]].copy())
+            temp2 = make_lag_features(temp2, lags=(1, 7, 14, 28))
+            row = temp2[temp2["ds"] == target_date]
+            if row.empty:
+                yhat = float(hist["y"].tail(7).mean())
+            else:
+                yhat = float(model.predict(row[features])[0])
+            preds.append(yhat)
+            combined.loc[combined["ds"] == target_date, "y"] = yhat
 
-            fig = px.line(out, x="ds", y="yhat", title="Prophet Forecast (yhat)")
-            st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(out, use_container_width=True)
-
-        else:
-            xgb_path = settings.artifacts_dir / "xgb_model.joblib"
-            if not xgb_path.exists():
-                st.error("XGBoost model not found. Run: python scripts/train_models.py")
-                return
-
-            pack = load_xgb(xgb_path)
-            model = pack["model"]
-            features = pack["features"]
-
-            hist = daily[["ds", "y"]].copy()
-            combined = pd.concat(
-                [hist, pd.DataFrame({"ds": future_df["ds"], "y": [None] * horizon})],
-                ignore_index=True
-            ).sort_values("ds")
-            combined["ds"] = pd.to_datetime(combined["ds"])
-
-            preds = []
-            for i in range(horizon):
-                target_date = future_dates[i]
-
-                temp = combined.copy()
-                temp["y"] = pd.to_numeric(temp["y"], errors="coerce")
-
-                temp2 = make_time_features(temp[["ds", "y"]].copy())
-                temp2 = make_lag_features(temp2, lags=(1, 7, 14, 28))
-
-                row = temp2[temp2["ds"] == target_date]
-                if row.empty:
-                    yhat = float(hist["y"].tail(7).mean())
-                else:
-                    yhat = float(model.predict(row[features])[0])
-
-                preds.append(yhat)
-                combined.loc[combined["ds"] == target_date, "y"] = yhat
-
-            out = pd.DataFrame({"ds": future_dates, "yhat": preds})
-            fig = px.line(out, x="ds", y="yhat", title="XGBoost Forecast (yhat)")
-            st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(out, use_container_width=True)
-
-        metrics_path = settings.artifacts_dir / "metrics.json"
-        if metrics_path.exists():
-            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-            st.caption("Model metrics (holdout)")
-            st.json(metrics)
+        out = pd.DataFrame({"ds": future_dates, "yhat": preds})
+        fig = px.line(out, x="ds", y="yhat", title="XGBoost Forecast (yhat)")
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(out, use_container_width=True)
 
     elif page == "Customers (RFM)":
         st.subheader("RFM Segmentation (KMeans)")
 
         rfm_path = settings.artifacts_dir / "rfm_scored.parquet"
         if not rfm_path.exists():
-            st.error("RFM artifacts not found. Run: python scripts/train_models.py")
+            st.error("RFM artifacts not found.")
             return
 
         rfm = pd.read_parquet(rfm_path)
@@ -229,13 +265,6 @@ def main():
         """).df()
         st.dataframe(counts, use_container_width=True)
 
-        nulls = con.execute("""
-            SELECT
-              sum(CASE WHEN order_purchase_ts IS NULL THEN 1 ELSE 0 END) AS null_purchase_ts,
-              sum(CASE WHEN customer_unique_id IS NULL THEN 1 ELSE 0 END) AS null_customer_unique_id
-            FROM mart.mart_orders
-        """).df()
-        st.dataframe(nulls, use_container_width=True)
 
 if __name__ == "__main__":
     main()
