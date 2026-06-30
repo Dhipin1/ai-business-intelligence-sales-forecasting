@@ -1,15 +1,14 @@
-pandas==2.2.2
-numpy==1.26.4
-duckdb==1.0.0
-pyarrow==16.1.0
+pandas
+numpy<2.0
+duckdb
+pyarrow
 
-streamlit==1.36.0
-plotly==5.22.0
+streamlit
+plotly
 
-scikit-learn==1.5.1
-joblib==1.4.2
+scikit-learn
+joblib
 
-xgboost==2.1.0
-prophet==1.1.5
+xgboost
 
-python-dotenv==1.0.1
+python-dotenv
