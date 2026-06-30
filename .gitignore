@@ -1,0 +1,31 @@
+# Virtual Environment
+.venv/
+env/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Database & Data
+data/db/
+data/raw/
+*.duckdb
+*.parquet
+
+# Artifacts (trained models - optional, but keeps repo small)
+artifacts/
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
